@@ -1,0 +1,836 @@
+---
+title: "Merger simulation"
+author: "Junjun Zhang"
+date: "2022/5/9"
+output:
+  html_document: default
+  pdf_document: default
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = F,message = F)
+```
+
+
+
+```{r,include=TRUE}
+# Check  whether the packages called below require installation.
+rm (list = ls(all=TRUE))#Clearn objects from the workspace
+graphics.off() #Close the graphics
+#Simple, Consistent Wrappers for Common String Operations
+if ('stringr' %in% rownames(installed.packages())==FALSE) {
+  install.packages('stringr')
+}else{
+  library(stringr)
+}
+#Extract this Rmd file's working directory
+if (!'rstudioapi' %in% rownames(installed.packages())) {
+  install.packages('rstudioapi')
+}else{
+  library(rstudioapi)
+}
+#Export the regression result to xlsx
+if ('openxlsx' %in% rownames(installed.packages())==FALSE) {
+  install.packages('openxlsx')
+}else{
+  library(openxlsx)
+}
+
+#Export the regression result to latex format tables
+if (!'stargazer' %in% rownames(installed.packages())) {
+  install.packages('stargazer')
+}else{
+  library(stargazer)
+}
+#Connect to pyblp python package
+if (!'reticulate' %in% rownames(installed.packages())) {
+  install.packages('reticulate')
+}else{
+  library(reticulate)
+}
+#Visulaize the missing values in the dataframe
+if (!'VIM' %in% rownames(installed.packages())) {
+  install.packages('VIM')
+}else{
+  library(VIM)
+}
+#  A Grammar of Data Manipulation
+if (!'dplyr' %in% rownames(installed.packages())) {
+  install.packages('dplyr')
+}else{
+  library(dplyr)
+}
+#Fast and User-Friendly Fixed-Effects Estimations
+if (!'fixest' %in% rownames(installed.packages())) {
+  install.packages('fixest')
+}else{
+  library(fixest)
+}
+#Package for 2sls regression
+if (!'ivreg' %in% rownames(installed.packages())) {
+  install.packages('ivreg')
+}else{
+  library(ivreg)
+}
+
+
+```
+
+# Set the working directory
+```{r analysis,include=TRUE}
+script_path <- rstudioapi::getActiveDocumentContext()$path
+hash = "(.*)/"
+setwd(str_extract(script_path, hash)) 
+```
+
+```{r}
+data1 <- readRDS('../data/Rds_data/complete_data2.Rds')#read the data
+data1 <- data1[,-c(5,8)] #delete the title and sales column
+prochar <- read.csv('../data/raw_char.csv')#Read product characteristics data 
+#select the suction,battery life,package dimension,item-weight
+# Check the NA,NAN and NULL value, due to limitation of collecting from Amazon
+prochar1 <- prochar[!is.na(prochar$Wok_1charge),]
+prochar2 <- prochar1[!is.na(prochar1$suction),]
+prochar2 <- prochar2[!is.na(prochar2$ProDim),]
+prochar2 <- prochar2[!is.na(prochar2$Item_Weight),]
+prochar3 <- prochar2[!is.null(prochar2$Wok_1charge),]
+prochar3 <- prochar2[!is.null(prochar2$suction),]
+# Take out the suction,work_1charge, prodim and item weight,type1 and asin columns
+prochar4 <- prochar3[,c(2,3,7,10,12,13)] 
+#Merge the data with the characteristics data
+data2 <- data1[data1$asin %in% prochar4$asin,]
+data3 <- merge(data2,prochar4,by='asin')
+
+# Convert the product dimension data into length x width x height numerical data
+kk <- data3$ProDim
+kk <- gsub('\\s','',kk)
+ttttt <- str_split(kk,'x')
+number_vector <- c()
+for (i in seq(1,length(ttttt),1)) {
+  FOR_LOOP <- as.numeric(gsub('[A-Za-z]','',ttttt[[i]]))
+  res <- 1
+  if(length(FOR_LOOP)!=0){
+    for (j in 1:length(FOR_LOOP)) {
+      res <- res * FOR_LOOP[j]
+    }
+  }
+  
+  number_vector <- append(number_vector,res)
+  
+}
+data3$ProDim <- number_vector
+data3$Item_Weight <- as.numeric(gsub('[A-Za-z]','',data3$Item_Weight)) # Clean the item-weight data
+
+```
+
+# Prepare the data
+##  Visualize the missing values
+```{r  check the missing valuables}
+data4 <- data3
+summary(data4)
+stargazer(data4,summary = TRUE)
+# aggr(data4,prop=FALSE,numbers=TRUE,cex.axis=0.6,ylabs = c('Number of missing values','Combinations'))
+```
+
+It shows that the price has 63 missing value. There two potential reasons. One is that the product is not available at that quarter. Another the price data is not recorded at that quarter.
+
+
+```{r  blp IV}
+# Ownership structure function
+owner <- function(thisOwner){
+  owners <- as.numeric(factor(thisOwner, levels= unique(thisOwner)))
+  nprod <- length(thisOwner)
+  thisOwner <- matrix(0,ncol=nprod,nrow=nprod)
+  for( o in unique(owners)){
+    thisOwner [owners == o, owners == o] = 1
+  }
+  return(thisOwner)
+}
+## Prepare for the regression, clear the missing value here
+data4 <- data4[!is.na(data3$prices),]
+data4 <- data4[!is.nan(data3$prices),]
+### Only choose there are more than ten products quarter data
+table(data4$market_ids)      #we can see the number of product in market is increasing thought the time.
+data4 <- data4[-which(data4$market_ids=='R16Q3',arr.ind = TRUE),]
+data4 <- data4[-which(data4$market_ids=='R16Q4',arr.ind = TRUE),]
+data4 <- data4[-which(data4$market_ids=='R17Q1',arr.ind = TRUE),]
+data4 <- data4[-which(data4$market_ids=='R17Q2',arr.ind = TRUE),]
+data4 <- data4[-which(data4$market_ids=='R17Q3',arr.ind = TRUE),]
+data4 <- data4[-which(data4$market_ids=='R17Q4',arr.ind = TRUE),]
+
+# Form the id for character value function
+.indexing.markets <- function( cdidOld ) {
+  cdidOld <- as.character(cdidOld)
+  unique.ids <-  unique(cdidOld)
+  nmkt <- length(unique.ids)
+  cdid <- numeric(length(cdidOld))
+  
+  for(i in 1:nmkt ){
+    relevantMarkets <- cdidOld == unique.ids[i]
+    cdid[ relevantMarkets ] <- i
+    
+  }
+  return( cdid )
+}
+#remember when you changed the iv, you need to re-index all the id data
+# data4$firm_ids <- .indexing.markets(data4$brand)
+# data4$product_ids <- .indexing.markets(data4$asin)
+data4$pro_age <- 2022-as.numeric(data4$year)
+data4 <- data4[complete.cases(data4$asin),]
+data4$suction <- as.numeric(data4$suction)
+
+# Redifine the product j here
+# Now the definition of product j is based on the brand 
+PROCESS <- data4 %>%
+  group_by(market_ids,brand,type1) %>%
+  summarise(Averate2 = mean(Averate2),
+            prices = mean(prices),
+            rating = sum(rating),
+            shares = sum(shares),
+            Wok_1charge = mean(Wok_1charge),
+            suction = mean(suction),
+            ProDim = mean(ProDim),
+            Item_Weight = mean(Item_Weight),
+            pro_age = mean(pro_age),
+            num.pro = ifelse(n()>1,1,0)
+  ) %>%
+  ungroup()
+
+PROCESS$firm_ids <- .indexing.markets(PROCESS$brand)
+colnames(PROCESS)[2] <- 'Firm'
+colnames(PROCESS)[3] <- 'brand'
+PROCESS$product_ids <- .indexing.markets(PROCESS$brand)
+coln <- colnames(PROCESS)
+PROCESS <- as.data.frame(PROCESS)
+colnames(PROCESS) <- coln
+# cor(PROCESS[,c(4:12)])
+
+#### Blp type iv function
+constructIV <- function(firmid, cdid, id, X) {
+  n <- dim(X)[1]
+  p <- dim(X)[2]
+  names <- colnames(X)
+  if (is.null(names)) names <- paste("V", 1:p, sep="")
+  sum.other <-  matrix(NA, nrow = n, ncol = p)
+  colnames(sum.other) <- paste("sum.o.", names, sep="")  # sum other
+  sum.rival <-  matrix(NA, nrow = n, ncol = p)
+  colnames(sum.rival) <- paste("sum.r.", names, sep="")  # sum rival
+  
+  for (i in 1:n) {
+    for (j in 1:p) {
+      other_ind=(firmid==firmid[i] & cdid==cdid[i] & id!=id[i])
+      rival_ind=(firmid!=firmid[i] & cdid==cdid[i])
+      
+      sum.other[i,j]=sum(X[other_ind==1,j])
+      sum.rival[i,j]=sum(X[rival_ind==1,j]) 
+    }
+  }
+  return(cbind(sum.other, sum.rival))
+}
+##work1charge,suction,item-weight,product dimension , and pro_age IV
+blp_iv <- constructIV(PROCESS[,14],PROCESS[,1],PROCESS[,15],PROCESS[,8:12])
+data5 <- cbind(PROCESS,blp_iv)
+data5 <- data5[!is.na(data5$rating),]
+
+
+```
+
+
+```{r}
+# Prepare for the regression data.
+datatest <- data5
+datatest$prices <- datatest$prices/1000 # logit model, the price enters lineraly, while in CES, the price will enter logarithmly
+datatest$shares <- log(datatest$shares)-log(0.5) ## Do I need to line up the same form as the estimation form, what is the quatity  and income in my model.
+
+# stargazer(datatest)
+
+####  Firm id dummy and Market id dummy
+dummycol <- data.frame(datatest$product_ids)
+colnames(dummycol) <- c("product")
+#Package for dummy variables
+if (!'fastDummies' %in% rownames(installed.packages())) {
+  install.packages('fastDummies')
+}else{
+  library(fastDummies)
+}
+test.df <- dummy_cols(dummycol, select_columns = "product", remove_first_dummy = T)
+test.df <- test.df[,-1]
+datatest2 <- cbind(datatest, test.df)
+
+#quarter fixed effect
+dummycol_time <- data.frame(datatest$market_ids)
+colnames(dummycol_time) <- c("quarYear")
+
+test.df_time <- dummy_cols(dummycol_time, select_columns = "quarYear", remove_first_dummy = T)
+test.df_time1 <- test.df_time[,-1]
+datatest2 <- cbind(datatest2, test.df_time1)
+
+#First stage  12:157,158:173,174:176,177:192
+stage1_price <- lm(prices~ .-shares -Averate2,data = datatest2[,-c(1:3,6,14:15,26:187)])
+# summary(stage1_price)
+
+stage1_quality <- lm(Averate2~ .-prices -shares,data = datatest2[,-c(1:3,6,14:15,26:187)])
+# summary(stage1_quality)
+
+names <- tibble(test.df,test.df_time1)
+name <- colnames(names)
+stargazer(stage1_price,stage1_quality,omit =name )
+
+# ols
+m_ols <- lm(shares ~ .,data =datatest2[,-c(1:3,6,14:15)] )
+test1 <- datatest2[,-c(1:3,6,10,14:15,18,21:25)]
+#Based on first stage regression result, we use sum.o.Wok_1charge ,sum.o.suction and sum.o.pro_age as IVS
+m_iv_put <- ivreg(shares ~ .-sum.o.Wok_1charge -sum.o.suction  -sum.o.pro_age |  .-prices -Averate2, data = test1[,-11])
+# summary(m_iv_put)
+
+#Show the regression result of OLS and 2SLS
+stargazer(m_ols,m_iv_put,title="Regression Results",omit = name,type = 'text')
+
+alpha <- -1.034  # get from the 2sls regression result. Coefficient of price
+tau <- 0.3667# Coefficient of quality g
+# Get the innitail meanvalue vector
+value <- m_iv_put$fitted.values- alpha * datatest2$prices- tau * datatest2$Averate2
+datatest4 <-datatest2
+datatest4$meanval <- value 
+#Create a working environment to store data into excel file
+wb1 <- createWorkbook(creator = 'junjunz',title = 'ces_d')
+
+```
+
+According to the coefficient of Averate2, an increase of one average star in rating will result in an increase of 2.509 unit of market share. This coefficient is too large. According to the table, a one-unit rise in price (dollars) will result in a 1% drop in market share.
+$$
+U_{ijt}=\alpha p_{jt}+\tau g_{jt} + x_{jt}\beta + \xi_{jt}+\epsilon_{ijt}
+$$
+
+
+The $i$ is the consumer.The $j$ is the product, and $t$ is the market which is expressed as  quarter.The price and quality of the product are $p_{jt}$ and $g_{jt}$ which are endogenous variable in my model. The $x_{jt}$ are the demand side exogenous product characteristics and the control variables. $\beta$ is the coefficient of exogenous product characteristics. $\xi_{jt}$ is unobserved demand side product characteristics.The utility of the outside goods is usual normalized to zero($U_{i0t}=\epsilon_{i0t}$). $\epsilon_{ijt}$ is distributed IID with the Type I Extreme value distribution. The market share can be  as following
+
+$$
+s_{jt} = \frac{exp(\alpha p_{jt}+\tau g_{jt} + x_{jt}\beta + \xi_{jt})}{1 + \sum_{k}^{J}exp(\alpha p_{kt}+\tau g_{kt} + x_{kt}\beta + \xi_{kt})}
+$$
+Take the log of the above equation, we get:
+$$
+log(s_{jt})=\alpha p_{jt}+\tau g_{jt} + x_{jt}\beta + \xi_{jt}-log(\sum_{k}^{J}exp(\alpha p_{kt}+\tau g_{kt} + x_{kt}\beta + \xi_{kt}))
+$$
+and 
+
+$$
+log(s_{0t})=-log(\sum_{k}^{J}exp(\alpha p_{kt}+\tau g_{kt} + x_{kt}\beta^{ex} + \xi_{kt}))
+$$
+The differEnce between the two equations is:
+$$
+log(s_{jt})-log(s_{0t})=\alpha p_{jt}+\tau g_{jt} + x_{jt}\beta + \xi_{jt}
+$$
+$s_{jt}$ is the market share of product $j$ and $s_{0t}$ is the market share of the outside goods which is assumed as 0.5 in my case. Then we estimate the above equation by IV GMM. The total number of product in each market is $J$.
+
+### Run the merger simulation
+
+I set the meanval which is $x_{kt}\beta + \xi_{kt}$ to be a fixed vector. I  extract one market data which is R22Q1 market to do the merger simulation.
+
+
+
+
+Function owner is the ownership structure function
+
+```{r ownershiip}
+owner <- function(thisOwner){
+  owners <- as.numeric(factor(thisOwner, levels= unique(thisOwner)))
+  nprod <- length(thisOwner)
+  thisOwner <- matrix(0,ncol=nprod,nrow=nprod)
+  for( o in unique(owners)){
+    thisOwner [owners == o, owners == o] = 1
+  }
+  return(thisOwner)
+}
+```
+
+
+## Claculate the market shares 
+The market shares are calculated using the following equation:
+
+$$
+s_{jt} = \frac{exp(\alpha p_{jt}+\tau g_{jt} + x_{jt}\beta + \xi_{jt})}{1 + \sum_{k}^{J}exp(\alpha p_{kt}+\tau g_{kt} + x_{kt}\beta + \xi_{kt})}
+$$
+
+The $g_{jT}$ is the quality of product j in market t which is expressed as the average number of ratings. $p_{jt}$ is the price of the product j in market t. Here I will set a initial variable for  $ x_{j}\beta+ \xi_{j}$ which is meanval in the code.Here I assume only the price $p_{jt}$ and quality level $g_{jt}$ will change. So in the later code, I am trying to find the fixed point of the price and quality level. 
+
+Function calcShares is the calculation of market share.
+```{r market shares}
+#Market shares function when price and quality change at the same time
+calcShares <- function(prices,quality,meanval,alpha,tau){
+  shares <- exp(meanval + alpha*prices+tau*quality)
+  shares <- shares/(1 + sum(shares,na.rm=TRUE))
+  return(shares)
+}
+
+#Market shares function when price only changes
+calcShares.p <- function(prices,quality,meanval,alpha,tau){
+  shares <- exp(meanval + alpha*prices+tau*quality)
+  shares <- shares/(1 + sum(shares,na.rm=TRUE))
+  return(shares)
+}
+
+
+
+```
+
+
+## Calculate the elasticities
+
+Calculate the price elasticity of the product according to 
+$$
+    \eta_{jk} = \frac{\partial s_{j}}{\partial p_{k} }\frac{ p_{k}}{ s_{j}}=\{ \begin{array}{rcl}
+    \alpha (1-s_{j})p_{k}      &      & {if\quad j=k}\\
+    -\alpha s_{k}p_{k}     &      & {otherwise}\\
+    \end{array}
+$$
+
+```{r}
+elast_price <- function(shares,prices,alpha){
+  nprods <-  length(shares)
+  shares <- as.matrix(shares,nrow = nprods, ncol = 1)
+  elast <- -alpha  * matrix(prices*shares,ncol=nprods,nrow=nprods,byrow=TRUE)
+  diag(elast) <- alpha*prices + diag(elast)
+  return(elast)
+}
+```
+
+
+## Calculate the quality elasticities
+The elasticity of quality will be calculated as follows:
+$$
+    \psi_{jk} = \frac{\partial s_{j}}{\partial g_{k} }\frac{ g_{k}}{ s_{j}}=\{ \begin{array}{rcl}
+    \tau (1-s_{j})g_{k}      &      & {if\quad j=k}\\
+    -\tau g_{k}s_{k}     &      & {otherwise}\\
+    \end{array}
+$$
+
+```{r quality}
+elast_quality <- function(shares,quality,tau){
+  nprods <-  length(shares)
+  shares <- as.matrix(shares,nrow = nprods, ncol = 1)
+  elast <- -tau  * matrix(quality*shares,ncol=nprods,nrow=nprods,byrow=TRUE)
+  diag(elast) <- tau*quality + diag(elast)
+  return(elast)
+}
+```
+
+## Calculate the marginal cost of quality
+
+Calculate the marginal cost according to,
+$$
+    \pi_{f}(\boldsymbol{p} ,\boldsymbol{g}) = \sum_{k\in \mathcal{F}_f}((p_{k}-c_{k}+\delta)q_k(\boldsymbol{p} ,\boldsymbol{g}) - C(g_k)) 
+$$
+
+
+
+
+Where $p_{k}$ is the price of product $j$. $c_{k}$ is the constant marginal cost of product $k$. $q_j(\boldsymbol{p} ,\boldsymbol{g})$ is demand,as given by 1, now written as a function of the $J\; \times \;1$ price vector $\boldsymbol{p}$ and quality vector $\boldsymbol{g}$.  $\delta$ is the product efficiency which is assumed constant. $C(g_{k})$ is the cost of investment on product k which is assumed convex and increasing.The profit-maximizing price of each product $j=1,\cdots ,J$ should satisfy the following first-order condition:
+$$
+        q_{j}(\boldsymbol{p},\boldsymbol{g}) + \sum_{k\in \mathcal{F}_f}(p_{k}-c_{k}+\delta) \frac{\partial q_{k}(\boldsymbol{p},\boldsymbol{g})}{\partial p_{j}}=0  
+$$
+
+And it can be inverted into the following expression:
+$$
+\boldsymbol{c=p+(\Omega^{F} \odot \bigtriangleup(p))^{-1}q(p,g)}
+$$
+The markup on the right hand is determined by demand's own-price and cross-price elasticities.
+
+
+The marginal cost$c$ can be calculated using premerger prices and estimated demand price elasticities:
+$$
+\boldsymbol{c^{pre}=p^{pre}+(\Omega^{F,pre} \odot \Delta(p^{pre}))^{-1}s(p^{pre})}
+$$
+
+The above equation can be changed in two ways. One is the change in ownership as a result of the merger; another is the marginal cost ( I assume the marginal cost will not change in this model). Later, I'll use the fixed point iteration to solve the nonlinear system equation.
+
+$\Omega^{F} \odot \Delta(p)$ is the product ownership structure multiply partial derivatives which can be expressed as following:
+
+In logit, the quatity should equal the market share.
+
+$$
+\Omega^{pre}\odot \Delta(p^{pre})=\left\{
+\begin{array}{cccccc}
+\frac{\partial s_{1}}{\partial p_{1}}(p^{pre},g^{pre}) \cdot \Omega_{1,1} & \frac{\partial s_{2}}{\partial p_{1}}(p^{pre},g^{pre}) \cdot \Omega_{1,2} &\cdots&\frac{\partial s_{j}}{\partial p_{1}}(p^{pre},g^{pre}) \cdot \Omega_{1,j} & \cdots&\frac{\partial s_{J}}{\partial p_{1}}(p^{pre},g^{pre}) \cdot \Omega_{1,J}\\
+\frac{\partial s_{1}}{\partial p_{2}}(p^{pre},g^{pre}) \cdot \Omega_{2,1} & \frac{\partial s_{2}}{\partial p_{2}}(p^{pre},g^{pre}) \cdot \Omega_{2,2} &\cdots&\frac{\partial s_{j}}{\partial p_{2}}(p^{pre},g^{pre}) \cdot \Omega_{1,j} & \cdots&\frac{\partial D_{J}}{\partial p_{2}}(p^{pre},g^{pre}) \cdot \Omega_{2,J}\\
+\vdots & \vdots & \ddots &  \vdots  &  \ddots   & \vdots \\
+\frac{\partial s_{1}}{\partial p_{j}}(p^{pre},g^{pre}) \cdot \Omega_{k,1} & \frac{\partial s_{2}}{\partial p_{j}}(p^{pre},g^{pre}) \cdot \Omega_{k,2} &\cdots&\frac{\partial s_{j}}{\partial p_{j}}(p^{pre},g^{pre}) \cdot \Omega_{k,j} & \cdots&\frac{\partial s_{J}}{\partial p_{j}}(p^{pre},g^{pre}) \cdot \Omega_{k,J} \\
+\vdots & \vdots & \ddots &  \vdots  &  \ddots   & \vdots \\
+\frac{\partial s_{1}}{\partial p_{J}}(p^{pre},g^{pre}) \cdot \Omega_{J,1} & \frac{\partial s_{2}}{\partial p_{J}}(p^{pre},g^{pre}) \cdot \Omega_{J,2} &\cdots&\frac{\partial s_{j}}{\partial p_{J}}(p^{pre},g^{pre}) \cdot \Omega_{J,j} & \cdots&\frac{\partial s_{J}}{\partial p_{J}}(p^{pre},g^{pre}) \cdot \Omega_{J,J}
+\end{array} \right \}     
+$$
+
+
+Where 
+
+$$
+\Omega_{k,j} = \left \{
+\begin{array}{ccc}   
+1 &  & \mbox{if product k and j are produced by the same firm}\\
+0 &  & \mbox{otherwise}    
+\end{array}    
+\right.
+$$
+
+The partial derivatives $\frac{\partial s_{j}}{\partial p_{k}}$ is calculated based on the elasticity $\eta_{jk} = \frac{\partial s_{j}}{\partial p_{k} }\frac{ p_{k}}{ s_{j}}$, then
+
+$$
+\frac{\partial s_{j}}{\partial p_{k}}=\eta_{jk}\cdot\frac{s_{j}}{ p_{k}}
+$$
+
+
+```{r}
+calcMc_price <- function(prices,quality,meanval,alpha,tau,owner){
+  share_i <- calcShares(prices,quality,meanval,alpha,tau)
+  price_over_share_i <- matrix(1/(share_i)) %*% matrix(prices, nrow = 1)
+  elasticities_i <- elast_price(share_i,prices,alpha)
+  derivatives_i <- elasticities_i / price_over_share_i # partial derivatives of shares wrt price
+  own_prod_pre_i <- owner # if element (i,j) equals 1, that means that prod i and j are produced by same firm
+  markups <- c(solve(t(derivatives_i) * own_prod_pre_i) %*% (share_i))
+  arg_cost <- prices + markups
+  isNegMC <- arg_cost < 0
+  if(any(isNegMC, na.rm = TRUE)){
+    # warning(paste("Negative marginal costs were calibrated for the following brands:", paste(prodNames[isNegMC], collapse=",")))
+    arg_cost[isNegMC] <- min(arg_cost[!isNegMC]) #set the negative marginal cost to the lowest positive vaule in the data
+  }
+  return(arg_cost)
+}
+```
+
+## Estimate the marginal cost of the investment
+First I will get the initial $C^{'}_{g}$ according to the following equation:
+$$
+    \boldsymbol{(\Omega^{pre} \odot \Delta(g^{pre}))(p^{pre}-c^{pre}) =C^{'pre}(g_{k})}
+$$
+$\Omega^{pre}$ is the product ownership structure. $\Delta(g^{pre})$ is the partial derivative with respect to quality($g$). $C^{'pre}(g_{k})$ is the marginal cost of quality($g_{k}$). Then $\Omega^{pre} \odot \Delta(g^{pre})$ can be expressed as following:
+
+$$
+\Omega^{pre} \odot \Delta(g^{pre})=\left\{
+\begin{array}{cccccc}
+\frac{\partial s_{1}}{\partial g_{1}}(p^{pre},g^{pre}) \cdot \Omega_{1,1} & \frac{\partial s_{2}}{\partial g_{1}}(p^{pre},g^{pre}) \cdot \Omega_{1,2} &\cdots&\frac{\partial s_{j}}{\partial g_{1}}(p^{pre},g^{pre}) \cdot \Omega_{1,j} & \cdots&\frac{\partial s_{J}}{\partial g_{1}}(p^{pre},g^{pre}) \cdot \Omega_{1,J}\\
+\frac{\partial s_{1}}{\partial g_{2}}(p^{pre},g^{pre}) \cdot \Omega_{2,1} & \frac{\partial s_{2}}{\partial g_{2}}(p^{pre},g^{pre}) \cdot \Omega_{2,2} &\cdots&\frac{\partial s_{j}}{\partial g_{2}}(p^{pre},g^{pre}) \cdot \Omega_{1,j} & \cdots&\frac{\partial s_{J}}{\partial g_{2}}(p^{pre},g^{pre}) \cdot \Omega_{2,J}\\
+\vdots & \vdots & \ddots &  \vdots  &  \ddots   & \vdots \\
+\frac{\partial s_{1}}{\partial g_{j}}(p^{pre},g^{pre}) \cdot \Omega_{k,1} & \frac{\partial s_{2}}{\partial g_{j}}(p^{pre},g^{pre}) \cdot \Omega_{k,2} &\cdots&\frac{\partial s_{j}}{\partial p_{j}}(p^{pre},g^{pre}) \cdot \Omega_{k,j} & \cdots&\frac{\partial s_{J}}{\partial g_{j}}(p^{pre},g^{pre}) \cdot \Omega_{k,J} \\
+\vdots & \vdots & \ddots &  \vdots  &  \ddots   & \vdots \\
+\frac{\partial s_{1}}{\partial g_{J}}(p^{pre},g^{pre}) \cdot \Omega_{J,1} & \frac{\partial s_{2}}{\partial g_{J}}(p^{pre},g^{pre}) \cdot \Omega_{J,2} &\cdots&\frac{\partial s_{j}}{\partial p_{J}}(p^{pre},g^{pre}) \cdot \Omega_{J,j} & \cdots&\frac{\partial s_{J}}{\partial g_{J}}(p^{pre},g^{pre}) \cdot \Omega_{J,J}
+\end{array} \right \} 
+$$
+
+
+Where 
+
+$$
+\Omega_{k,j} = \left \{
+\begin{array}{ccc}
+1 &  & \mbox{if product k and j are produced by the same firm}\\
+0 &  & \mbox{otherwise}
+\end{array} 
+\right.
+$$
+
+
+This is the function for calculating the  marginal cost of investment $C^{'}(g)$.
+
+```{r}
+calcMC_quality <- function(prices,quality,meanval,alpha,tau,owner){
+  mc_price <- calcMc_price(prices,quality,meanval,alpha,tau,owner)
+  share_i <- calcShares(prices,quality,meanval,alpha,tau)
+  quality_pre_i <- quality
+  quality_over_share_i <- matrix(1 / (share_i)) %*% matrix(quality_pre_i, nrow = 1)
+  elasticities_i <- elast_quality(share_i,quality_pre_i,tau)
+  derivatives_i <- elasticities_i / quality_over_share_i # partial derivatives of shares wrt quality
+  own_prod_pre_i <- owner # if element (i,j) equals 1, that means that prod i and j are produced by same firm
+  mc_quality <- (t(derivatives_i) * own_prod_pre_i) %*% (prices-mc_price)
+  isNegMC <- mc_quality < 0
+  
+  if(any(isNegMC, na.rm = TRUE)){
+    mc_quality[isNegMC] <- min(mc_quality[!isNegMC])#set the negative marginal cost to the lowest positive vaule in the data
+
+    }
+  return(mc_quality)
+}
+
+```
+
+Calculate the shares and marginal cost when only the price changes.
+```{r}
+calcShares.p <- function(prices,quality,meanval,alpha,tau){
+  shares <- exp(meanval + alpha*prices+tau*quality)
+  shares <- shares/(1 + sum(shares,na.rm=TRUE))
+  return(shares)
+}
+
+
+calcMc_price.p <- function(prices,quality,meanval,alpha,tau,owner){
+  share_i <- calcShares.p(prices,quality,meanval,alpha,tau)
+  price_over_share_i <- matrix(1 / (share_i)) %*% matrix(prices, nrow = 1)
+  elasticities_i <- elast_price(share_i,prices,alpha)
+  derivatives_i <- elasticities_i / price_over_share_i # partial derivatives of shares wrt price
+  own_prod_pre_i <- owner # if element (i,j) equals 1, that means that prod i and j are produced by same firm
+  markups <- c(solve(t(derivatives_i) * own_prod_pre_i) %*% (share_i))
+  arg_cost <- prices + markups
+  isNegMC <- arg_cost < 0
+
+  if(any(isNegMC, na.rm = TRUE)){
+    # warning(paste("Negative marginal costs were calibrated for the following brands:", paste(prodNames[isNegMC], collapse=",")))
+    arg_cost[isNegMC] <- min(arg_cost[!isNegMC])
+  }
+  return(arg_cost)
+}
+```
+
+
+
+I suppose that the quality's marginal cost can be stated as a linear form of quality. Then I run the following basic regression:
+
+$$
+C^{'} = a+\beta g + \epsilon
+$$
+
+
+
+
+```{r HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH}
+datatest5 <- datatest4
+meanval <- datatest5$meanval
+quality_pre <- datatest5$Averate2 # The average of ratings are expressed as the product quality
+price_pre <-datatest5$prices
+brand_pre <- datatest5$Firm
+ownerpre <- owner(brand_pre)
+datatest5$Firm[which(datatest5$Firm=='ilife')] = 'irobot'
+brand_post <- datatest5$Firm
+ownerpost <- owner(brand_post)
+mc.qua <- calcMC_quality(price_pre,quality_pre,meanval,alpha,tau,ownerpre)
+
+datatest5$mc_quality_pre <- mc.qua
+linear.2 <- feols(mc_quality_pre ~ Averate2| brand , datatest5)
+coef_quality <- linear.2$coeftable[1,1]
+etable(linear.2)
+```
+
+## Solve the nonlinear system equation by using BBsolve R package
+
+Check the detail of the bbsolve R package(https://cran.r-project.org/web/packages/BB/index.html),
+
+The fixed point of price and quality are calculated as following:
+
+$$
+\begin{pmatrix} \boldsymbol{s}  \\ \boldsymbol{-C_{g}^{'}}  \end{pmatrix}+\begin{pmatrix} \Omega \odot \Delta(p) & 0 \\ 0 & \Omega \odot \Delta(g) \end{pmatrix}\begin{pmatrix}  \boldsymbol{p-c} \\ \boldsymbol{p-c}  \end{pmatrix}=\begin{pmatrix} 0  \\ 0  \end{pmatrix}
+$$
+
+```{r}
+set.seed(100)
+# a loop for running the merger simulation based on the quater that you want to get
+for (i in c('R20Q4','R21Q1','R21Q2','R21Q3','R21Q4','R22Q1')) {
+  market_ids <-i
+  data.R22Q1 <- datatest4[datatest4$market_ids==market_ids,]
+  # meanval <- data.R22Q1$meanval
+  # meanval <- rep(1,length(data.R22Q1$asin)) 
+  ## Try to get 2020 to 2022
+  # data.R22Q1$year <- as.numeric(data.R22Q1$year)
+  prodNames <- data.R22Q1$asin # product label
+  
+  
+  Unobpart <- datatest5$mc_quality_pre[datatest4$market_ids==market_ids]-linear.2$fitted.values[datatest4$market_ids==market_ids] # get the unobserved part that will affect the marginal cost of quality
+  data.R22Q1$Unobpart <- Unobpart
+  meanval <- data.R22Q1$meanval
+  quality_pre <- data.R22Q1$Averate2 # The average of ratings are expressed as the product quality
+  price_pre <-data.R22Q1$prices
+  brand_pre <- data.R22Q1$Firm
+  ownerpre <- owner(brand_pre)
+  data.R22Q1$Firm[which(data.R22Q1$Firm=='ilife')] = 'irobot'
+  brand_post <- data.R22Q1$Firm
+  ownerpost <- owner(brand_post)
+  data.R22Q1$Item_Weight <- as.numeric(data.R22Q1$Item_Weight)
+  # L <- sum(data.R22Q1$rating)
+  # L <- 1
+  set.seed(100)
+  # elasticities_pre_mkt <- elast_price()
+  FOC <- function(innitial_vetor){
+    len <- length(innitial_vetor)
+    delta <- innitial_vetor[1:(len/2)]
+    prices <- price_pre# In p-neutral logit, the price will not change
+    quality <- innitial_vetor[(len/2+1):len]
+    implied_shares <- calcShares(prices,quality,meanval,alpha,tau)
+    price_over_shares <- matrix(1 / (implied_shares)) %*% matrix(prices, nrow = 1)
+    elasticities_pre_price <- elast_price(implied_shares,prices,alpha)
+    derivatives_price <- elasticities_pre_price / price_over_shares
+    
+    # markups_post <- c(-solve(t(derivatives_price) * ownerpre) %*% implied_shares)
+    marg_cost <- calcMc_price(price_pre,quality_pre,meanval,alpha,tau,ownerpre)
+    
+    quality_over_shares <- matrix(1 / (implied_shares)) %*% matrix(quality, nrow = 1)
+    elasticities_pre_quality <- elast_quality(implied_shares,quality,tau)
+    derivatives_quality <- elasticities_pre_quality / quality_over_shares
+    
+    # markups_post <- c(-solve(t(derivatives_quality) * ownerpre) %*% implied_shares)
+    vec1 <- as.matrix(coef_quality*quality+Unobpart)
+    M1_PRICE <- t(derivatives_price) * ownerpre
+    M2_QUALITY <- t(derivatives_quality) * ownerpre
+    Merge_matrix <- rbind(cbind(M1_PRICE,matrix(0,nrow=nrow(M1_PRICE),ncol=ncol(M2_QUALITY))),cbind(matrix(0,nrow=nrow(M2_QUALITY),ncol=ncol(M1_PRICE)),M2_QUALITY))
+    price_mc <- prices - marg_cost+ delta# We let the product efficiency change in this model here
+    matrix_price_mc <- append(price_mc,price_mc)
+    matrix_price_mc <- matrix(matrix_price_mc,ncol = 1)
+    matrix_shares_mC <- append((implied_shares),-vec1)
+    matrix_shares_mC <- matrix(matrix_shares_mC,ncol = 1)
+    thisFOC <- as.vector(matrix_shares_mC + Merge_matrix %*% matrix_price_mc)
+    return(thisFOC)
+  }
+  library(BB)
+  innitial_vector <- append(rep(0,length(data.R22Q1$Averate2)),data.R22Q1$Averate2)# The innitial value for the product efficiency need to find a proper one
+  minResult.pre <- dfsane(innitial_vector,FOC,quiet=FALSE,control=list(maxit = 5000))
+  FOC_post <- function(innitial_vetor){
+    
+    len <- length(innitial_vetor)
+    delta <- innitial_vetor[1:(len/2)]
+    prices <- price_pre
+    quality <- innitial_vetor[(len/2+1):len]
+    implied_shares <- calcShares(prices,quality,meanval,alpha,tau)
+    price_over_shares <- matrix(1 / (implied_shares)) %*% matrix(prices, nrow = 1)
+    elasticities_pre_price <- elast_price(implied_shares,prices,alpha)
+    derivatives_price <- elasticities_pre_price / price_over_shares
+    
+    # markups_post <- c(-solve(t(derivatives_price) * ownerpre) %*% implied_shares)
+    marg_cost <- calcMc_price(price_pre,quality_pre,meanval,alpha,tau,ownerpre)
+    
+    quality_over_shares <- matrix(1 / (implied_shares)) %*% matrix(quality, nrow = 1)
+    elasticities_pre_quality <- elast_quality(implied_shares,quality,tau)
+    derivatives_quality <- elasticities_pre_quality / quality_over_shares
+    
+    # markups_post <- c(-solve(t(derivatives_quality) * ownerpre) %*% implied_shares)
+    vec1 <- as.matrix(coef_quality*quality+Unobpart)
+    # vec2 <- rep(1,length(quality))
+    # vec1+vec2 <- calcMargins_quality(prices,quality)
+    # f <- priceCand - marg_cost - markups_post
+    # f <- priceCand - marg_cost - markups_post
+    # f
+    M1_PRICE <- t(derivatives_price) * ownerpost
+    M2_QUALITY <- t(derivatives_quality) * ownerpost
+    Merge_matrix <- rbind(cbind(M1_PRICE,matrix(0,nrow=nrow(M1_PRICE),ncol=ncol(M2_QUALITY))),cbind(matrix(0,nrow=nrow(M2_QUALITY),ncol=ncol(M1_PRICE)),M2_QUALITY))
+    price_mc <- prices - marg_cost + delta
+    matrix_price_mc <- append(price_mc,price_mc)
+    matrix_price_mc <- matrix(matrix_price_mc,ncol = 1)
+    matrix_shares_mC <- append((implied_shares),-vec1)
+    matrix_shares_mC <- matrix(matrix_shares_mC,ncol = 1)
+    thisFOC <- as.vector(matrix_shares_mC + Merge_matrix %*% matrix_price_mc)
+    return(thisFOC)
+  }
+  len <- length(innitial_vector)
+  # inni_delta <- price_pre-minResult.pre$par[1:(len/2)]
+  innitial_vector <- append(rep(0,length(innitial_vector)/2),data.R22Q1$Averate2)
+  minResult.post <- dfsane(innitial_vector,FOC_post,quiet=FALSE,control=list(maxit = 5000))
+  
+  
+  EstdeltaPre.pg <- minResult.pre$par[1:(len/2)]
+  EstqualityPre.pg <- minResult.pre$par[(len/2+1):len]
+  EstqualityPre.pg[which(EstqualityPre.pg<0,arr.ind = T)] <- 0.5
+  EstqualityPre.pg[which(EstqualityPre.pg>5,arr.ind = T)] <- 5
+  EstsharesPre.pg <- calcShares(price_pre,EstqualityPre.pg,meanval,alpha,tau)
+  EstdeltaPost.pg <- minResult.post$par[1:(len/2)]
+  EstqualityPost.pg <- minResult.post$par[(len/2+1):len]
+  EstqualityPost.pg[which(EstqualityPost.pg<0,arr.ind = T)] <- 1
+  EstqualityPost.pg[which(EstqualityPost.pg>5,arr.ind = T)] <- 5
+  EstsharesPost.pg <- calcShares(price_pre,EstqualityPost.pg,meanval,alpha,tau)
+  
+  #pROPOSITION1
+  #The l*m
+  
+  prices <- price_pre
+  quality <- minResult.post$par[(len/2+1):len]
+  implied_shares <- calcShares(prices,quality,meanval,alpha,tau)
+  price_over_shares <- matrix(1 / (implied_shares)) %*% matrix(prices, nrow = 1)
+  elasticities_pre_price <- elast_price(implied_shares,prices,alpha)
+  derivatives_price <- elasticities_pre_price / price_over_shares
+  
+  quality_over_shares <- matrix(1 / (implied_shares)) %*% matrix(quality, nrow = 1)
+  elasticities_pre_quality <- elast_quality(implied_shares,quality,tau)
+  derivatives_quality <- elasticities_pre_quality / quality_over_shares
+  
+  p_diversion_ration <- -derivatives_price/diag(derivatives_price)
+  p_diversion_ration.same <- p_diversion_ration * ownerpost
+  price_ratio <- apply(p_diversion_ration.same,1,sum)
+  
+  q_diversion_ration <- -derivatives_quality/diag(derivatives_quality)
+  q_diversion_ration.same <- q_diversion_ration * ownerpost 
+  quality_ratio <- apply(q_diversion_ration.same,1,sum)
+  
+  quality_price_lm <- -quality_ratio/price_ratio*implied_shares
+  
+  #the h*m
+  prices <- price_pre
+  quality <- minResult.pre$par[(len/2+1):len]
+  implied_shares <- calcShares(prices,quality,meanval,alpha,tau)
+  price_over_shares <- matrix(1 / (implied_shares)) %*% matrix(prices, nrow = 1)
+  elasticities_pre_price <- elast_price(implied_shares,prices,alpha)
+  derivatives_price <- elasticities_pre_price / price_over_shares
+  
+  quality_over_shares <- matrix(1 / (implied_shares)) %*% matrix(quality, nrow = 1)
+  elasticities_pre_quality <- elast_quality(implied_shares,quality,tau)
+  derivatives_quality <- elasticities_pre_quality / quality_over_shares
+  
+  quality_price_hm <- -diag(derivatives_quality)/diag(derivatives_price)*implied_shares
+  
+  lm_hm <- quality_price_lm - quality_price_hm
+  
+  g.m_g <- (EstqualityPost.pg- EstqualityPre.pg)/EstqualityPre.pg
+  
+  
+  #Then I need to prove the difference of the diversion ratio in the core paper
+  # delta <- innitial_vetor[1:(len/2)]
+  prices <- price_pre
+  quality <- minResult.post$par[(len/2+1):len]
+  implied_shares <- calcShares(prices,quality,meanval,alpha,tau)
+  price_over_shares <- matrix(1 / (implied_shares)) %*% matrix(prices, nrow = 1)
+  elasticities_pre_price <- elast_price(implied_shares,prices,alpha)
+  derivatives_price <- elasticities_pre_price / price_over_shares
+  
+  quality_over_shares <- matrix(1 / (implied_shares)) %*% matrix(quality, nrow = 1)
+  elasticities_pre_quality <- elast_quality(implied_shares,quality,tau)
+  derivatives_quality <- elasticities_pre_quality / quality_over_shares
+  
+  p_diversion_ration <- -derivatives_price/diag(derivatives_price)
+  diag(p_diversion_ration) <- 0
+  p_diversion_ration.same <- p_diversion_ration * ownerpost
+  p_diversion_ration.same <- apply(p_diversion_ration.same,1,sum)
+  
+  q_diversion_ration <- -derivatives_quality/diag(derivatives_quality)
+  diag(q_diversion_ration) <- 0
+  q_diversion_ration.same <- q_diversion_ration * ownerpost 
+  q_diversion_ration.same <- apply(q_diversion_ration.same,1,sum)
+  
+  
+  price_quality <- p_diversion_ration.same-q_diversion_ration.same
+  corollary1 <- price_quality
+  
+  Est_result.pg <- data.frame(brand_pre,brand_post,EstqualityPre.pg,EstsharesPre.pg,EstsharesPost.pg,EstdeltaPre.pg,EstdeltaPost.pg,EstqualityPost.pg,p_diversion_ration.same,
+                              q_diversion_ration.same,corollary1,
+                              g.m_g,lm_hm)
+  Est_result.pg$label <- ''
+  Est_result.pg$label[Est_result.pg$brand_post=='irobot'] <- "*"
+  # Est_result.pg$priceDif.pg <- Est_result.pg$EstpricePost-Est_result.pg$EstpricePre
+  Est_result.pg$qualityDif.pg <- (Est_result.pg$EstqualityPost.pg-Est_result.pg$EstqualityPre.pg)/Est_result.pg$EstqualityPre.pg
+  Est_result.pg$EstsharDif.pg <- (Est_result.pg$EstsharesPost.pg-Est_result.pg$EstsharesPre.pg)/Est_result.pg$EstsharesPre.pg
+  Est_result.pg$deltaDif.pg <- (Est_result.pg$EstdeltaPost.pg - Est_result.pg$EstdeltaPre.pg)/Est_result.pg$EstdeltaPre.pg
+  Est_result.pg <- Est_result.pg %>%
+    relocate(label,.after = brand_post)
+  # stargazer(Est_result.pg,type = 'text')
+  
+  Pro1 <- Est_result.pg
+  Pro1$Ob.price <- price_pre
+  Pro1$Ob.quality <- quality_pre
+  # Pro1$Obprice_dif_pg <- price_pre-Pro1$EstpricePre.pg
+  Pro1$Obquality_dif_pg <- quality_pre-Pro1$EstqualityPre.pg
+  Pro1$Ob.shares <- exp(data.R22Q1$shares+log(0.5))
+  shares_ori <- exp(data.R22Q1$shares+log(0.5))
+  Pro1$EST_ob_sharepg <- Pro1$EstsharesPre.pg-shares_ori
+  
+  
+  Pro1 <- Pro1[order(Pro1$label,decreasing = T),]
+  Pro1 <- Pro1[Pro1$label=='*',]
+  addWorksheet(wb1,sheetName = market_ids)
+  writeData(wb1,sheet = market_ids,x = Pro1)
+}
+
+saveWorkbook(wb1, "logit_P_neutral.xlsx", overwrite = TRUE)
+
+
+
